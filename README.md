@@ -70,6 +70,6 @@ This project was completed in **R** using packages including:
 
 Walter M Nyamutamba
 Samuel Agyekum
-Honorine
+Honorine Mujawayezu
 Belyse
 Grace
