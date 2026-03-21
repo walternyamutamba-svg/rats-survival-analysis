@@ -69,7 +69,7 @@ This project was completed in **R** using packages including:
 ## Author
 
 Walter M Nyamutamba
-Samuel Agmoen
+Samuel Agyekum
 Honorine
 Belyse
 Grace
