@@ -68,4 +68,8 @@ This project was completed in **R** using packages including:
 
 ## Author
 
-Your Name
+Walter M Nyamutamba
+Samuel Agmoen
+Honorine
+Belyse
+Grace
