@@ -68,8 +68,8 @@ This project was completed in **R** using packages including:
 
 ## Author
 
-Walter M Nyamutamba
-Samuel Agyekum
-Honorine Mujawayezu
-Belyse
-Grace
+- `Walter M Nyamutamba`
+- `Samuel Agyekum`
+- `Honorine Mujawayezu`
+- `Belyse`
+- `Grace`
