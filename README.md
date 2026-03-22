@@ -99,5 +99,5 @@ R packages used: `survival`, `flexsurv`, `survminer`, `ggplot2`,
 - Walter M Nyamutamba
 - Samuel Agyekum
 - Honorine Mujawayezu
-- Belyse
+- Belyse Kaneza
 - Grace Kitonyi
