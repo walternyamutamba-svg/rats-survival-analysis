@@ -67,7 +67,7 @@ k > 1 confirms an increasing hazard over time.
 |---|---|
 | `rats_survival_analysis.Rmd` | Full R Markdown source (complete analysis) |
 | `rats_survival_analysis.R` | Plain R script version |
-| `rats_survival_presentation.pdf` | Beamer presentation slides |
+| `Group4_SA_1.pdf` | Beamer presentation slides |
 | `outputs/km_by_treatment.png` | KM curves by treatment group |
 | `outputs/km_by_sex.png` | KM curves by sex |
 | `outputs/aic_comparison.png` | AIC bar chart — all 7 models |
