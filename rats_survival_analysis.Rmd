@@ -1,6 +1,6 @@
 ---
 title: "Parametric Survival Analysis of the Rats Dataset"
-author: "Walter Nyamutamba, Samuel Agyekum, Honorine Mujawayezu, Belyse, Grace Kitonyi"
+author: "Walter Nyamutamba, Samuel Agyekum, Honorine Mujawayezu, Belyse Kaneza, Grace Kitonyi"
 date: "`r Sys.Date()`"
 output:
   html_document:
