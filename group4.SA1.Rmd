@@ -1,0 +1,944 @@
+---
+title: "Parametric Survival Analysis of the Rats Dataset"
+author: "Walter Nyamutamba, Samuel Agyekum, Honorine Mujawayezu, Belyse Kaneza, Grace Kitonyi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 6
+)
+```
+
+## Introduction
+
+This report analyses the `rats` dataset from the `survival` package in R. The dataset comes from a study where rats were exposed to a carcinogenic agent and monitored for tumour development. We use parametric survival models to understand the time-to-tumour patterns and compare the treated and control groups.
+
+The key variables we work with are:
+
+- `time` — observed survival time (days)
+- `status` / `event` — tumour occurrence indicator (1 = tumour, 0 = censored)
+- `treatment` — treatment group (Control vs Treated)
+- `sex` — sex of the rat (f = female, m = male)
+- `litter` — litter identifier (used to account for clustering)
+
+---
+
+## Packages
+
+```{r packages}
+library(survival)
+library(flexsurv)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(broom)
+library(gridExtra)
+library(patchwork)
+
+# helper to style all our tables consistently
+style_table <- function(df, caption) {
+  df %>%
+    kbl(caption = caption) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    ) %>%
+    row_spec(0, bold = TRUE, background = "#2E86AB", color = "white")
+}
+```
+
+---
+
+## Data Preparation
+
+```{r data-prep}
+data(rats)
+
+rats <- rats %>%
+  mutate(
+    litter    = as.factor(litter),
+    event     = as.numeric(status),
+    treatment = factor(ifelse(rx == 1, "Treated", "Control"),
+                       levels = c("Control", "Treated")),
+    sex       = as.factor(sex)
+  )
+
+rats_clean <- rats %>%
+  select(litter, time, event, treatment, sex) %>%
+  na.omit()
+```
+
+### Missing values
+
+```{r missing}
+data.frame(
+  Variable = names(rats),
+  Missing  = colSums(is.na(rats)),
+  Percent  = round(100 * colSums(is.na(rats)) / nrow(rats), 1)
+) %>%
+  style_table("Table 1: Missing Data Check")
+```
+
+No missing values — all 300 observations are complete.
+
+---
+
+## Descriptive Summary
+
+```{r descriptive}
+# overall + by group
+overall <- data.frame(
+  Group          = "Overall",
+  N              = nrow(rats_clean),
+  Events         = sum(rats_clean$event),
+  Censored       = sum(rats_clean$event == 0),
+  Event_Rate_Pct = round(mean(rats_clean$event) * 100, 1),
+  Min_Time       = min(rats_clean$time),
+  Max_Time       = max(rats_clean$time),
+  Mean_Time      = round(mean(rats_clean$time), 2),
+  Median_Time    = median(rats_clean$time),
+  SD_Time        = round(sd(rats_clean$time), 2)
+)
+
+by_group <- rats_clean %>%
+  group_by(Group = treatment) %>%
+  summarise(
+    N              = n(),
+    Events         = sum(event),
+    Censored       = sum(event == 0),
+    Event_Rate_Pct = round(mean(event) * 100, 1),
+    Min_Time       = min(time),
+    Max_Time       = max(time),
+    Mean_Time      = round(mean(time), 2),
+    Median_Time    = median(time),
+    SD_Time        = round(sd(time), 2),
+    .groups        = "drop"
+  ) %>%
+  mutate(Group = as.character(Group))
+
+bind_rows(overall, by_group) %>%
+  style_table("Table 2: Sample Summary by Group")
+```
+
+A few things stand out immediately. The overall event rate is only 14% (42/300), meaning the majority of rats never developed a tumour during the study. The treated group has a noticeably higher event rate (~21%) compared to control (~10.5%), which makes biological sense — the treated rats received a carcinogen.
+
+```{r eda-plots, fig.height=7}
+p1 <- ggplot(rats_clean, aes(x = time, fill = treatment)) +
+  geom_histogram(bins = 20, alpha = 0.75, color = "white", position = "identity") +
+  scale_fill_manual(values = c("Control" = "#2E86AB", "Treated" = "#F18F01")) +
+  labs(title = "Distribution of Survival Times", x = "Time (days)", y = "Count", fill = "") +
+  theme_minimal()
+
+p2 <- ggplot(rats_clean, aes(x = treatment, fill = treatment)) +
+  geom_bar() +
+  scale_fill_manual(values = c("#2E86AB", "#F18F01")) +
+  labs(title = "Treatment Group Sizes", x = "", y = "Count") +
+  theme_minimal() + theme(legend.position = "none")
+
+p3 <- ggplot(rats_clean, aes(x = sex, fill = sex)) +
+  geom_bar() +
+  scale_fill_manual(values = c("#A23B72", "#3B7080")) +
+  labs(title = "Sex Distribution", x = "", y = "Count") +
+  theme_minimal() + theme(legend.position = "none")
+
+p4 <- ggplot(rats_clean, aes(x = treatment, y = time, fill = treatment)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c("#2E86AB", "#F18F01")) +
+  labs(title = "Survival Time by Treatment", x = "", y = "Time (days)") +
+  theme_minimal() + theme(legend.position = "none")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+The survival time distribution is left-skewed — most rats survived close to the maximum follow-up of 104 days. The 2:1 allocation (200 control, 100 treated) is by design.
+
+---
+
+## Kaplan–Meier Analysis
+
+```{r km-setup}
+surv_obj <- Surv(time = rats_clean$time, event = rats_clean$event)
+```
+
+### Overall survival curve
+
+```{r km-overall, fig.height=7}
+km_overall <- survfit(surv_obj ~ 1, data = rats_clean)
+
+ggsurvplot(
+  km_overall,
+  data      = rats_clean,
+  conf.int  = TRUE,
+  risk.table = TRUE,
+  palette   = "#2E86AB",
+  ggtheme   = theme_minimal(),
+  title     = "Overall Kaplan–Meier Survival Curve",
+  xlab      = "Time (days)",
+  ylab      = "Survival Probability S(t)",
+  risk.table.title = "Number at Risk"
+)
+```
+
+### Survival by treatment group
+
+```{r km-treatment, fig.height=7}
+km_treatment <- survfit(surv_obj ~ treatment, data = rats_clean)
+
+ggsurvplot(
+  km_treatment,
+  data          = rats_clean,
+  conf.int      = TRUE,
+  risk.table    = TRUE,
+  pval          = TRUE,
+  pval.method   = TRUE,
+  palette       = c("#2E86AB", "#F18F01"),
+  legend.labs   = c("Control", "Treated"),
+  legend.title  = "Group",
+  ggtheme       = theme_minimal(),
+  title         = "Kaplan–Meier Curves by Treatment Group",
+  subtitle      = "Median survival not reached — event rate < 50%",
+  xlab          = "Time (days)",
+  ylab          = "Survival Probability S(t)",
+  surv.median.line = "none",
+  risk.table.title = "Number at Risk",
+  tables.theme  = theme_cleantable()
+)
+```
+
+### Survival by sex
+
+```{r km-sex, fig.height=7}
+km_sex <- survfit(surv_obj ~ sex, data = rats_clean)
+
+ggsurvplot(
+  km_sex,
+  data         = rats_clean,
+  conf.int     = TRUE,
+  risk.table   = TRUE,
+  pval         = TRUE,
+  pval.method  = TRUE,
+  palette      = c("#A23B72", "#3B7080"),
+  legend.labs  = c("Female", "Male"),
+  legend.title = "Sex",
+  ggtheme      = theme_minimal(),
+  title        = "Kaplan–Meier Curves by Sex",
+  xlab         = "Time (days)",
+  ylab         = "Survival Probability S(t)",
+  risk.table.title = "Number at Risk",
+  tables.theme = theme_cleantable()
+)
+```
+
+Sex turns out to be a very strong predictor (p < 0.0001), something we carry into the Cox models below.
+
+### Why median survival is NA
+
+Median survival is only defined when at least 50% of subjects experience the event. With only 14% overall event rate, the KM curve never drops below 0.5, so the median is mathematically undefined — this is expected, not an error. We report the **Restricted Mean Survival Time (RMST)** instead.
+
+```{r rmst}
+rmst_overall <- summary(km_overall)$table
+rmst_groups  <- summary(km_treatment)$table
+
+rmst_table <- data.frame(
+  Group     = c("Overall", "Control", "Treated"),
+  RMST_days = round(c(
+    rmst_overall["rmean"],
+    rmst_groups["treatment=Control", "rmean"],
+    rmst_groups["treatment=Treated", "rmean"]
+  ), 2),
+  SE = round(c(
+    rmst_overall["se(rmean)"],
+    rmst_groups["treatment=Control", "se(rmean)"],
+    rmst_groups["treatment=Treated", "se(rmean)"]
+  ), 4)
+)
+
+style_table(rmst_table, "Table 3: Restricted Mean Survival Time by Group")
+```
+
+```{r surv-probs}
+key_times <- c(25, 50, 75, 100)
+sp        <- summary(km_treatment, times = key_times)
+
+data.frame(
+  Time      = sp$time,
+  Group     = gsub("treatment=", "", sp$strata),
+  Survival  = round(sp$surv,  4),
+  Lower_95  = round(sp$lower, 4),
+  Upper_95  = round(sp$upper, 4),
+  N_at_risk = sp$n.risk,
+  Events    = sp$n.event
+) %>%
+  style_table("Table 4: Survival Probabilities at Key Time Points")
+```
+
+### Log-rank test
+
+```{r logrank}
+lr_test <- survdiff(surv_obj ~ treatment, data = rats_clean)
+pval    <- 1 - pchisq(lr_test$chisq, df = 1)
+
+data.frame(
+  Statistic   = round(lr_test$chisq, 4),
+  df          = 1,
+  p_value     = round(pval, 4),
+  Conclusion  = ifelse(pval < 0.05,
+                       "Significant difference between groups",
+                       "No significant difference")
+) %>%
+  style_table("Table 5: Log-Rank Test Result")
+```
+
+---
+
+## Cox Proportional Hazards Models
+
+We fit three versions of the Cox model: unadjusted (treatment only), adjusted (treatment + sex), and a clustered version that accounts for within-litter correlation using robust standard errors.
+
+### Unadjusted Cox model
+
+```{r cox-unadjusted}
+cox_simple <- coxph(Surv(time, event) ~ treatment, data = rats_clean)
+
+tidy(cox_simple, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 6: Unadjusted Cox Model (Treatment Only)")
+```
+
+### Multivariable Cox model
+
+```{r cox-multi}
+cox_multi <- coxph(Surv(time, event) ~ treatment + sex, data = rats_clean)
+
+tidy(cox_multi, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 7: Multivariable Cox Model (Treatment + Sex)")
+```
+
+After adjusting for sex, the treatment effect strengthens (HR = 2.21, p = 0.011). Sex is highly significant — male rats have dramatically lower hazard (HR ≈ 0.047, p < 0.001), suggesting a strong sex effect on tumour development.
+
+### Cox model with litter clustering
+
+```{r cox-cluster}
+cox_cluster <- coxph(
+  Surv(time, event) ~ treatment + sex + cluster(litter),
+  data = rats_clean
+)
+
+tidy(cox_cluster, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 8: Cox Model with Litter-Clustered Standard Errors")
+```
+
+Accounting for litter clustering gives us robust standard errors. The treatment effect remains significant (HR = 2.21, p = 0.007), and the results are largely consistent with the unadjusted clustered SEs, confirming our earlier findings are not an artefact of within-litter dependence.
+
+### Tie-handling comparison
+
+```{r ties}
+cox_b <- coxph(Surv(time, event) ~ treatment + sex, data = rats_clean, ties = "breslow")
+cox_e <- coxph(Surv(time, event) ~ treatment + sex, data = rats_clean, ties = "efron")
+cox_x <- coxph(Surv(time, event) ~ treatment + sex, data = rats_clean, ties = "exact")
+
+data.frame(
+  Method       = c("Breslow", "Efron", "Exact"),
+  Treatment_HR = round(exp(c(coef(cox_b)["treatmentTreated"],
+                              coef(cox_e)["treatmentTreated"],
+                              coef(cox_x)["treatmentTreated"])), 3),
+  Treatment_p  = round(c(summary(cox_b)$coefficients["treatmentTreated","Pr(>|z|)"],
+                          summary(cox_e)$coefficients["treatmentTreated","Pr(>|z|)"],
+                          summary(cox_x)$coefficients["treatmentTreated","Pr(>|z|)"]), 4)
+) %>%
+  style_table("Table 9: Tie-Handling Method Comparison")
+```
+
+All three methods give nearly identical results, so the choice of tie-handling does not affect our conclusions here.
+
+### Adjusted survival curves from Cox model
+
+```{r cox-curves, fig.height=7}
+newdata_cox <- data.frame(
+  treatment = factor(c("Control", "Treated"), levels = c("Control", "Treated")),
+  sex       = factor(c("f", "f"), levels = levels(rats_clean$sex))
+)
+
+cox_surv <- survfit(cox_multi, newdata = newdata_cox)
+
+ggsurvplot(
+  cox_surv,
+  data         = newdata_cox,
+  conf.int     = TRUE,
+  palette      = c("#2E86AB", "#F18F01"),
+  legend.labs  = c("Control", "Treated"),
+  legend.title = "Group",
+  ggtheme      = theme_minimal(),
+  title        = "Adjusted Survival Curves from Cox Model (Female Rats)",
+  xlab         = "Time (days)",
+  ylab         = "Survival Probability S(t)"
+)
+```
+
+---
+
+## Proportional Hazards Assumption Check
+
+```{r ph-test}
+ph_test <- cox.zph(cox_multi)
+
+as.data.frame(ph_test$table) %>%
+  mutate(Variable = rownames(.), across(where(is.numeric), ~round(.x, 4))) %>%
+  select(Variable, everything()) %>%
+  style_table("Table 10: Schoenfeld Residuals Test (PH Assumption)")
+```
+
+```{r schoenfeld-plots, fig.height=5}
+ph_test <- cox.zph(cox_multi)
+
+par(mfrow = c(1, 2))
+
+plot(ph_test, var = 1,
+     main = "Schoenfeld Residuals — Treatment",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#F18F01", lwd = 2)
+abline(h = coef(cox_multi)[1], col = "red", lty = 2, lwd = 2)
+
+plot(ph_test, var = 2,
+     main = "Schoenfeld Residuals — Sex",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#A23B72", lwd = 2)
+abline(h = coef(cox_multi)[2], col = "red", lty = 2, lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+The Schoenfeld test gives p = 0.020 for treatment, suggesting the proportional hazards assumption may be violated — the hazard ratio between groups appears to change over time. This motivates our use of parametric models, which do not require the PH assumption, as the primary inferential framework for this analysis.
+
+---
+
+## Weibull AFT Model
+
+Since the PH assumption is questionable for treatment, we also fit an Accelerated Failure Time (AFT) model, which models how covariates accelerate or decelerate survival time directly.
+
+```{r aft}
+aft_weibull <- survreg(
+  Surv(time, event) ~ treatment + sex,
+  data = rats_clean,
+  dist = "weibull"
+)
+
+tidy(aft_weibull, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 11: Weibull AFT Model Coefficients")
+```
+
+```{r aft-time-ratios}
+aft_coefs <- coef(aft_weibull)
+aft_coefs <- aft_coefs[!names(aft_coefs) %in% c("(Intercept)", "Log(scale)")]
+
+data.frame(
+  Variable   = names(aft_coefs),
+  Time_Ratio = round(exp(aft_coefs), 3),
+  Interpretation = c(
+    "Treated rats develop tumours ~19% sooner than control",
+    "Male rats survive ~2.3x longer tumour-free than female"
+  )
+) %>%
+  style_table("Table 12: Time Ratios from Weibull AFT Model")
+```
+
+The time ratio for treatment (0.809) means treated rats develop tumours about 19% sooner than control rats. The time ratio for sex (2.27) tells us male rats remain tumour-free more than twice as long as females on average.
+
+---
+
+## Parametric Model Fitting
+
+We fit seven parametric distributions to find the best model for survival time.
+
+```{r fit-models}
+dist_list <- c(
+  "Exponential"       = "exp",
+  "Weibull"           = "weibull",
+  "Log-Normal"        = "lnorm",
+  "Log-Logistic"      = "llogis",
+  "Gamma"             = "gamma",
+  "Gompertz"          = "gompertz",
+  "Generalized Gamma" = "gengamma"
+)
+
+fits <- lapply(dist_list, function(d) {
+  tryCatch(
+    flexsurvreg(surv_obj ~ 1, data = rats_clean, dist = d),
+    error = function(e) NULL
+  )
+})
+names(fits) <- names(dist_list)
+fits <- Filter(Negate(is.null), fits)
+```
+
+### Model comparison table
+
+```{r model-comparison}
+model_comparison <- data.frame(
+  Model         = names(fits),
+  Log_Likelihood = sapply(fits, function(m) round(logLik(m)[1], 3)),
+  AIC           = sapply(fits, function(m) round(AIC(m), 3)),
+  BIC           = sapply(fits, function(m) round(BIC(m), 3)),
+  Num_Params    = sapply(fits, function(m) length(m$coefficients))
+) %>%
+  arrange(AIC)
+
+rownames(model_comparison) <- NULL
+
+best_row <- which.min(model_comparison$AIC)
+
+model_comparison %>%
+  kbl(caption = "Table 13: Parametric Model Comparison (sorted by AIC)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, background = "#2E86AB", color = "white") %>%
+  row_spec(best_row, bold = TRUE, background = "#F0F8E8")
+```
+
+```{r best-model}
+best_model_name <- model_comparison$Model[1]
+best_model      <- fits[[best_model_name]]
+
+cat("Best model:", best_model_name, "\n")
+cat("AIC:", round(AIC(best_model), 3), "\n")
+cat("BIC:", round(BIC(best_model), 3), "\n")
+```
+
+### AIC comparison plot
+
+```{r aic-plot}
+ggplot(model_comparison, aes(x = reorder(Model, AIC), y = AIC, fill = Model == best_model_name)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("FALSE" = "#2E86AB", "TRUE" = "#F18F01")) +
+  coord_flip() +
+  labs(title = "AIC Comparison Across Parametric Models",
+       subtitle = paste("Best model highlighted:", best_model_name),
+       x = "", y = "AIC") +
+  theme_minimal()
+```
+
+### All models vs KM curve
+
+```{r km-vs-models}
+colors   <- c("#E53935","#1E88E5","#43A047","#FB8C00","#8E24AA","#00ACC1","#6D4C41")
+time_seq <- seq(0.1, max(rats_clean$time), length.out = 300)
+
+plot(
+  km_overall, col = "black", lwd = 2.5, conf.int = FALSE,
+  xlab = "Time (days)", ylab = "Survival Probability S(t)",
+  main = "All Parametric Models vs Kaplan–Meier",
+  ylim = c(0, 1)
+)
+
+for (i in seq_along(fits)) {
+  sp <- summary(fits[[i]], t = time_seq, type = "survival")[[1]]
+  lines(sp$time, sp$est, col = colors[i], lwd = 1.8, lty = 2)
+}
+
+legend("bottomleft",
+       legend = c("Kaplan–Meier", names(fits)),
+       col    = c("black", colors[seq_along(fits)]),
+       lwd    = 2, lty = c(1, rep(2, length(fits))),
+       cex    = 0.75, bty = "n")
+```
+
+### MLE parameter estimates for best model
+
+```{r best-params}
+param_table <- as.data.frame(best_model$res)
+param_table$Parameter <- rownames(param_table)
+
+all_cols  <- colnames(param_table)
+est_col   <- grep("^est$",           all_cols, value = TRUE)
+lower_col <- grep("l.*%|lower|L95",  all_cols, value = TRUE, ignore.case = TRUE)[1]
+upper_col <- grep("u.*%|upper|U95",  all_cols, value = TRUE, ignore.case = TRUE)[1]
+se_col    <- grep("^se$",            all_cols, value = TRUE)
+
+keep <- c("Parameter", est_col, lower_col, upper_col, se_col)
+keep <- keep[keep %in% colnames(param_table)]
+
+param_table <- param_table[, keep]
+colnames(param_table) <- c("Parameter","Estimate","Lower_95CI","Upper_95CI","SE")[1:ncol(param_table)]
+param_table[, -1] <- round(param_table[, -1], 4)
+rownames(param_table) <- NULL
+
+style_table(param_table, paste("Table 14: MLE Parameters —", best_model_name, "Model"))
+```
+
+---
+
+## Life Functions of the Best Model
+
+### Overall life functions
+
+```{r life-functions-overall, fig.height=7}
+S_t <- summary(best_model, t = time_seq, type = "survival")[[1]]$est
+h_t <- summary(best_model, t = time_seq, type = "hazard")[[1]]$est
+f_t <- h_t * S_t       # f(t) = h(t) * S(t)
+F_t <- 1 - S_t
+
+# Mean and variance (Weibull)
+if (best_model_name == "Weibull") {
+  shape  <- best_model$res["shape", "est"]
+  scale  <- best_model$res["scale", "est"]
+  mean_T <- scale * gamma(1 + 1/shape)
+  var_T  <- scale^2 * (gamma(1 + 2/shape) - (gamma(1 + 1/shape))^2)
+}
+
+par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
+
+plot(time_seq, S_t, type = "l", col = "#1E88E5", lwd = 2.5,
+     xlab = "Time (days)", ylab = "S(t)",
+     main = paste("Survival Function —", best_model_name), ylim = c(0,1))
+abline(h = 0.5, lty = 2, col = "grey60"); grid()
+
+plot(time_seq, h_t, type = "l", col = "#E53935", lwd = 2.5,
+     xlab = "Time (days)", ylab = "h(t)",
+     main = paste("Hazard Function —", best_model_name))
+grid()
+
+plot(time_seq, f_t, type = "l", col = "#43A047", lwd = 2.5,
+     xlab = "Time (days)", ylab = "f(t)",
+     main = paste("Density Function —", best_model_name))
+grid()
+
+plot(time_seq, F_t, type = "l", col = "#8E24AA", lwd = 2.5,
+     xlab = "Time (days)", ylab = "F(t)",
+     main = paste("CDF —", best_model_name), ylim = c(0,1))
+abline(h = 0.5, lty = 2, col = "grey60"); grid()
+
+par(mfrow = c(1,1))
+```
+
+```{r life-summary-table}
+if (best_model_name == "Weibull") {
+  data.frame(
+    Quantity = c("Shape (k)", "Scale (λ)", "Mean Survival Time",
+                 "Variance", "SD"),
+    Value    = c(round(shape, 4), round(scale, 4),
+                 paste(round(mean_T, 2), "days"),
+                 paste(round(var_T, 2), "days²"),
+                 paste(round(sqrt(var_T), 2), "days"))
+  ) %>%
+    style_table("Table 15: Weibull Model Life Function Summary")
+}
+```
+
+```{r surv-at-times}
+data.frame(
+  Time_days   = c(10, 25, 50, 75, 100),
+  S_t         = round(sapply(c(10,25,50,75,100), function(t)
+                  S_t[which.min(abs(time_seq - t))]), 4),
+  h_t         = round(sapply(c(10,25,50,75,100), function(t)
+                  h_t[which.min(abs(time_seq - t))]), 6),
+  F_t         = round(sapply(c(10,25,50,75,100), function(t)
+                  F_t[which.min(abs(time_seq - t))]), 4)
+) %>%
+  style_table("Table 16: Life Function Values at Key Time Points")
+```
+
+The shape parameter k > 1 confirms an **increasing hazard** — the longer a rat survives, the higher its risk of developing a tumour. The mean tumour-free survival time is approximately `r round(mean_T, 1)` days.
+
+---
+
+### Life functions by treatment group
+
+We fit the best model separately for each group to compare the survival patterns directly.
+
+```{r stratified-fits}
+rats_ctrl <- subset(rats_clean, treatment == "Control")
+rats_trt  <- subset(rats_clean, treatment == "Treated")
+
+best_dist <- dist_list[[best_model_name]]
+
+fit_ctrl <- flexsurvreg(Surv(time, event) ~ 1, data = rats_ctrl, dist = best_dist)
+fit_trt  <- flexsurvreg(Surv(time, event) ~ 1, data = rats_trt,  dist = best_dist)
+```
+
+```{r group-params-table}
+if (best_model_name == "Weibull") {
+  shape_ctrl <- fit_ctrl$res["shape","est"]
+  scale_ctrl <- fit_ctrl$res["scale","est"]
+  mean_ctrl  <- scale_ctrl * gamma(1 + 1/shape_ctrl)
+  var_ctrl   <- scale_ctrl^2 * (gamma(1+2/shape_ctrl) - gamma(1+1/shape_ctrl)^2)
+
+  shape_trt  <- fit_trt$res["shape","est"]
+  scale_trt  <- fit_trt$res["scale","est"]
+  mean_trt   <- scale_trt * gamma(1 + 1/shape_trt)
+  var_trt    <- scale_trt^2 * (gamma(1+2/shape_trt) - gamma(1+1/shape_trt)^2)
+
+  data.frame(
+    Group              = c("Control", "Treated"),
+    Shape_k            = round(c(shape_ctrl, shape_trt), 4),
+    Scale_lambda       = round(c(scale_ctrl, scale_trt), 4),
+    Mean_Survival_days = round(c(mean_ctrl, mean_trt), 2),
+    Variance_days2     = round(c(var_ctrl, var_trt), 2),
+    SD_days            = round(c(sqrt(var_ctrl), sqrt(var_trt)), 2)
+  ) %>%
+    style_table("Table 17: Weibull Parameters by Treatment Group")
+}
+```
+
+Both groups have shape > 1, confirming increasing hazard in both. Control rats have a longer mean tumour-free survival (`r round(mean_ctrl, 1)` days) compared to treated rats (`r round(mean_trt, 1)` days) — a difference of `r round(mean_ctrl - mean_trt, 1)` days, consistent with the carcinogenic treatment accelerating tumour onset.
+
+```{r stratified-life-plots, fig.height=7}
+time_seq2 <- seq(0.1, max(rats_clean$time), by = 1)
+
+S_ctrl <- summary(fit_ctrl, t = time_seq2, type = "survival")[[1]]$est
+h_ctrl <- summary(fit_ctrl, t = time_seq2, type = "hazard")[[1]]$est
+f_ctrl <- h_ctrl * S_ctrl
+F_ctrl <- 1 - S_ctrl
+
+S_trt  <- summary(fit_trt, t = time_seq2, type = "survival")[[1]]$est
+h_trt  <- summary(fit_trt, t = time_seq2, type = "hazard")[[1]]$est
+f_trt  <- h_trt * S_trt
+F_trt  <- 1 - S_trt
+
+cols2 <- c("Control" = "#2196F3", "Treated" = "#F44336")
+
+par(mfrow = c(2,2), mar = c(4.5, 4.5, 3.5, 1))
+
+plot(time_seq2, S_ctrl, type="l", col=cols2[1], lwd=2.5,
+     ylim=c(0,1), xlab="Time (days)", ylab="S(t)",
+     main="Survival Function by Group")
+lines(time_seq2, S_trt, col=cols2[2], lwd=2.5)
+abline(h=0.5, lty=2, col="grey60")
+legend("topright", legend=names(cols2), col=cols2, lwd=2, bty="n"); grid()
+
+plot(time_seq2, h_ctrl, type="l", col=cols2[1], lwd=2.5,
+     xlab="Time (days)", ylab="h(t)", main="Hazard Function by Group")
+lines(time_seq2, h_trt, col=cols2[2], lwd=2.5)
+legend("topleft", legend=names(cols2), col=cols2, lwd=2, bty="n"); grid()
+
+plot(time_seq2, f_ctrl, type="l", col=cols2[1], lwd=2.5,
+     xlab="Time (days)", ylab="f(t)", main="Density Function by Group")
+lines(time_seq2, f_trt, col=cols2[2], lwd=2.5)
+legend("topright", legend=names(cols2), col=cols2, lwd=2, bty="n"); grid()
+
+plot(time_seq2, F_ctrl, type="l", col=cols2[1], lwd=2.5,
+     ylim=c(0,1), xlab="Time (days)", ylab="F(t)", main="CDF by Group")
+lines(time_seq2, F_trt, col=cols2[2], lwd=2.5)
+abline(h=0.5, lty=2, col="grey60")
+legend("bottomright", legend=names(cols2), col=cols2, lwd=2, bty="n"); grid()
+
+par(mfrow=c(1,1))
+```
+
+---
+
+## Goodness of Fit — PP Plot
+
+```{r pp-plot}
+km_fit     <- survfit(surv_obj ~ 1, data = rats_clean)
+km_times   <- km_fit$time
+km_surv    <- km_fit$surv
+param_surv <- summary(best_model, t = km_times, type = "survival")[[1]]$est
+
+plot(
+  1 - km_surv, 1 - param_surv,
+  pch = 16, col = "#1E88E5", cex = 0.8,
+  xlab = "Empirical CDF (KM)",
+  ylab = paste("Fitted CDF (", best_model_name, ")"),
+  main = paste("PP-Plot: KM vs", best_model_name),
+  xlim = c(0,1), ylim = c(0,1)
+)
+abline(0, 1, col = "red", lwd = 2, lty = 2)
+legend("bottomright", legend = "Perfect fit", col = "red", lty = 2, lwd = 2, bty = "n")
+grid()
+```
+
+Points lying close to the 45° diagonal line indicate good agreement between the fitted Weibull model and the empirical KM estimate — the model fits the data well.
+
+---
+
+## Frailty Model — Accounting for Litter Clustering
+
+Rats within the same litter share genetic and environmental factors, making their outcomes correlated. A standard Cox model treats all observations as independent, which would underestimate standard errors. We use a shared frailty model to account for this.
+
+```{r frailty}
+frailty_model <- coxph(
+  Surv(time, event) ~ treatment + frailty(litter, distribution = "gamma"),
+  data = rats_clean
+)
+
+summary(frailty_model)
+```
+
+```{r frailty-hr}
+hr    <- exp(coef(frailty_model)["treatmentTreated"])
+hr_ci <- exp(confint(frailty_model))
+
+data.frame(
+  Model     = "Frailty (gamma)",
+  HR        = round(hr, 4),
+  Lower_95  = round(hr_ci["treatmentTreated", 1], 4),
+  Upper_95  = round(hr_ci["treatmentTreated", 2], 4),
+  Direction = ifelse(hr > 1, "Treated group has higher hazard", "Treated group has lower hazard")
+) %>%
+  style_table("Table 18: Frailty Model — Hazard Ratio for Treatment")
+```
+
+```{r frailty-theta}
+tryCatch({
+  theta <- frailty_model$history[[1]]$theta
+  cat(sprintf("Frailty variance (theta): %.4f\n", theta))
+  if (theta > 0.1) {
+    cat("There is meaningful within-litter clustering.\n")
+    cat("The frailty model is the appropriate choice for this data.\n")
+  } else {
+    cat("Litter clustering appears minimal, but including frailty is still good practice.\n")
+  }
+}, error = function(e) {
+  cat("Could not extract theta automatically. Check: frailty_model$history\n")
+})
+```
+
+After adjusting for litter clustering, treated rats have a significantly higher hazard of tumour development compared to controls (HR ≈ `r round(hr, 2)`, p < 0.05), which is consistent with the carcinogenic agent in the treatment.
+
+---
+
+## Final Summary
+
+```{r final-summary}
+data.frame(
+  Quantity = c(
+    "Total observations", "Events (tumours)", "Censored",
+    "Overall event rate", "Log-rank p-value",
+    "Best parametric model", "Best model AIC",
+    if (best_model_name == "Weibull") c("Weibull shape (k)", "Weibull scale (λ)",
+      "Mean survival time", "Variance") else NULL,
+    "Frailty HR (Treated vs Control)"
+  ),
+  Value = c(
+    nrow(rats_clean), sum(rats_clean$event), sum(rats_clean$event == 0),
+    paste0(round(mean(rats_clean$event)*100, 1), "%"),
+    round(pval, 4),
+    best_model_name,
+    round(model_comparison$AIC[1], 3),
+    if (best_model_name == "Weibull") c(round(shape,4), round(scale,4),
+      paste(round(mean_T,2),"days"), paste(round(var_T,2),"days²")) else NULL,
+    round(hr, 4)
+  )
+) %>%
+  style_table("Table 19: Final Results Summary")
+```
+
+---
+
+## Save Plots for GitHub
+
+```{r save-plots}
+if (!dir.exists("outputs")) dir.create("outputs")
+
+# KM by treatment
+png("outputs/km_by_treatment.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(km_treatment, data = rats_clean, conf.int = TRUE,
+  risk.table = TRUE, pval = TRUE, palette = c("#2E86AB","#F18F01"),
+  legend.labs = c("Control","Treated"), ggtheme = theme_minimal(),
+  title = "KM Curves by Treatment", xlab = "Time (days)",
+  surv.median.line = "none"))
+dev.off()
+
+# KM by sex
+png("outputs/km_by_sex.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(km_sex, data = rats_clean, conf.int = TRUE,
+  risk.table = TRUE, pval = TRUE, palette = c("#A23B72","#3B7080"),
+  legend.labs = c("Female","Male"), ggtheme = theme_minimal(),
+  title = "KM Curves by Sex", xlab = "Time (days)"))
+dev.off()
+
+# AIC comparison bar chart
+png("outputs/aic_comparison.png", width = 900, height = 600, res = 120)
+print(ggplot(model_comparison, aes(x = reorder(Model, AIC), y = AIC,
+    fill = Model == best_model_name)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("FALSE" = "#2E86AB", "TRUE" = "#F18F01")) +
+  coord_flip() +
+  labs(title = "AIC Comparison Across Parametric Models", x = "", y = "AIC") +
+  theme_minimal())
+dev.off()
+
+# Adjusted Cox survival curves
+png("outputs/cox_adjusted_curves.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(cox_surv, data = newdata_cox, conf.int = TRUE,
+  palette = c("#2E86AB","#F18F01"), legend.labs = c("Control","Treated"),
+  ggtheme = theme_minimal(), title = "Adjusted Survival Curves from Cox Model",
+  xlab = "Time (days)"))
+dev.off()
+
+# Schoenfeld residuals
+png("outputs/schoenfeld_residuals.png", width = 900, height = 500, res = 120)
+par(mfrow = c(1, 2))
+plot(ph_test, var = 1, main = "Schoenfeld — Treatment",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#F18F01", lwd = 2)
+abline(h = coef(cox_multi)[1], col = "red", lty = 2, lwd = 2)
+plot(ph_test, var = 2, main = "Schoenfeld — Sex",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#A23B72", lwd = 2)
+abline(h = coef(cox_multi)[2], col = "red", lty = 2, lwd = 2)
+par(mfrow = c(1, 1))
+dev.off()
+
+# PP plot
+png("outputs/pp_plot.png", width = 700, height = 700, res = 120)
+plot(1 - km_surv, 1 - param_surv, pch = 16, col = "#1E88E5", cex = 0.8,
+     xlab = "Empirical CDF (KM)",
+     ylab = paste("Fitted CDF (", best_model_name, ")"),
+     main = paste("PP-Plot: KM vs", best_model_name),
+     xlim = c(0,1), ylim = c(0,1))
+abline(0, 1, col = "red", lwd = 2, lty = 2)
+legend("bottomright", legend = "Perfect fit", col = "red", lty = 2, lwd = 2, bty = "n")
+grid()
+dev.off()
+
+# Overall life functions
+png("outputs/life_functions_overall.png", width = 900, height = 700, res = 120)
+par(mfrow = c(2,2), mar = c(4.5,4.5,3,1))
+plot(time_seq, S_t, type="l", col="#1E88E5", lwd=2.5,
+     xlab="Time (days)", ylab="S(t)", main="Survival Function", ylim=c(0,1)); grid()
+plot(time_seq, h_t, type="l", col="#E53935", lwd=2.5,
+     xlab="Time (days)", ylab="h(t)", main="Hazard Function"); grid()
+plot(time_seq, f_t, type="l", col="#43A047", lwd=2.5,
+     xlab="Time (days)", ylab="f(t)", main="Density Function"); grid()
+plot(time_seq, F_t, type="l", col="#8E24AA", lwd=2.5,
+     xlab="Time (days)", ylab="F(t)", main="CDF", ylim=c(0,1)); grid()
+par(mfrow=c(1,1))
+dev.off()
+
+# Life functions by group
+png("outputs/life_functions_by_group.png", width = 900, height = 700, res = 120)
+par(mfrow=c(2,2), mar=c(4.5,4.5,3.5,1))
+plot(time_seq2, S_ctrl, type="l", col="#2196F3", lwd=2.5,
+     ylim=c(0,1), xlab="Time (days)", ylab="S(t)", main="Survival by Group")
+lines(time_seq2, S_trt, col="#F44336", lwd=2.5)
+legend("topright", legend=c("Control","Treated"), col=c("#2196F3","#F44336"), lwd=2, bty="n"); grid()
+plot(time_seq2, h_ctrl, type="l", col="#2196F3", lwd=2.5,
+     xlab="Time (days)", ylab="h(t)", main="Hazard by Group")
+lines(time_seq2, h_trt, col="#F44336", lwd=2.5)
+legend("topleft", legend=c("Control","Treated"), col=c("#2196F3","#F44336"), lwd=2, bty="n"); grid()
+plot(time_seq2, f_ctrl, type="l", col="#2196F3", lwd=2.5,
+     xlab="Time (days)", ylab="f(t)", main="Density by Group")
+lines(time_seq2, f_trt, col="#F44336", lwd=2.5)
+legend("topright", legend=c("Control","Treated"), col=c("#2196F3","#F44336"), lwd=2, bty="n"); grid()
+plot(time_seq2, F_ctrl, type="l", col="#2196F3", lwd=2.5,
+     ylim=c(0,1), xlab="Time (days)", ylab="F(t)", main="CDF by Group")
+lines(time_seq2, F_trt, col="#F44336", lwd=2.5)
+legend("bottomright", legend=c("Control","Treated"), col=c("#2196F3","#F44336"), lwd=2, bty="n"); grid()
+par(mfrow=c(1,1))
+dev.off()
+
+cat("All 8 plots saved to outputs/\n")
+```
