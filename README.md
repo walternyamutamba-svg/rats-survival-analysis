@@ -72,4 +72,4 @@ This project was completed in **R** using packages including:
 - `Samuel Agyekum`
 - `Honorine Mujawayezu`
 - `Belyse`
-- `Grace`
+- `Grace Kitonyi`
