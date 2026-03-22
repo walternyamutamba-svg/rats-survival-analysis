@@ -85,8 +85,8 @@ k > 1 confirms an increasing hazard over time.
 - Schoenfeld residuals test (PH assumption)
 - Weibull AFT model
 - Parametric models: Exponential, Weibull, Log-Normal,
-  Log-Logistic, Gamma, Gompertz, Generalized Gamma
-- Model comparison using AIC and BIC
+  Log-Logistic, Gamma, Gompertz
+- Model comparison using AIC 
 - Shared gamma frailty model for litter clustering
 
 ## Software
