@@ -1,8 +1,8 @@
 ```{r}
 # =============================================================
 # Parametric Survival Analysis — Rats Dataset
-# Authors: Walter Nyamutamba, Samuel Agyekum, Honorine Mujawayezu,
-#          Belyse, Grace Kitonyi
+# Authors: Walter M Nyamutamba, Samuel Agyekum, Honorine Mujawayezu,
+#          Belyse Kaneza, Grace Kitonyi
 # Date: March 2026
 # =============================================================
 
