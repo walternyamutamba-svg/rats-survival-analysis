@@ -1,6 +1,6 @@
 # Rats Survival Analysis
 
-This repository contains my project on **parametric survival analysis** using the **rats dataset** in R.
+This repository contains our project on **parametric survival analysis** using the **rats dataset** in R.
 
 ## Project Overview
 
