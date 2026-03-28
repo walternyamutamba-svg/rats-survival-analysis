@@ -10,7 +10,7 @@
 | Report | Link |
 |---|---|
 | Project 1 — Parametric Analysis | [View on RPubs](https://rpubs.com/Grace_k/rats-survival-analysis) |
-| Project 2 — Extended Workflow | [View on RPubs](https://rpubs.com/Grace_k/rats-survival-analysis-2) |
+| Project 2 — Extended Workflow | [View on RPubs](https://rpubs.com/Grace_k/1414829) |
 | GitHub Repository | [walternyamutamba-svg/rats-survival-analysis](https://github.com/walternyamutamba-svg/rats-survival-analysis) |
 
 ---
