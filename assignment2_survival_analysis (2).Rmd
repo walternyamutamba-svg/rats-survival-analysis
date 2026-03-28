@@ -1,0 +1,1035 @@
+---
+title: "Advanced Survival Analysis — Rats Dataset"
+author: "Walter Nyamutamba, Samuel Agyekum, Honorine Mujawayezu, Belyse Kaneza, Grace Kitonyi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 6
+)
+```
+
+## Introduction
+
+This report extends the parametric survival analysis from Project 1 by applying
+non-parametric and semi-parametric methods to the `rats` dataset. We compare
+Kaplan–Meier and Nelson–Aalen estimates, perform formal hypothesis tests, fit
+Cox proportional hazards models with full diagnostics, and synthesise findings
+across all three analytical frameworks.
+
+---
+
+## Packages and Data
+
+```{r packages}
+library(survival)
+library(flexsurv)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(broom)
+library(gridExtra)
+
+style_table <- function(df, caption) {
+  df %>%
+    kbl(caption = caption) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    ) %>%
+    row_spec(0, bold = TRUE, background = "#2E86AB", color = "white")
+}
+```
+
+```{r data-prep}
+data(rats)
+
+rats <- rats %>%
+  mutate(
+    litter    = as.factor(litter),
+    event     = as.numeric(status),
+    treatment = factor(ifelse(rx == 1, "Treated", "Control"),
+                       levels = c("Control", "Treated")),
+    sex       = as.factor(sex)
+  )
+
+rats_clean <- rats %>%
+  select(litter, time, event, treatment, sex) %>%
+  na.omit()
+
+surv_obj <- Surv(time = rats_clean$time, event = rats_clean$event)
+```
+```{r}
+rats
+```
+
+---
+
+## Step 1: Kaplan–Meier Estimator
+
+### Overall survival curve
+
+```{r km-overall, fig.height=7}
+km_overall <- survfit(surv_obj ~ 1, data = rats_clean)
+
+ggsurvplot(
+  km_overall,
+  data             = rats_clean,
+  conf.int         = TRUE,
+  risk.table       = TRUE,
+  palette          = "#2E86AB",
+  ggtheme          = theme_minimal(),
+  title            = "Overall Kaplan–Meier Survival Curve",
+  xlab             = "Time (days)",
+  ylab             = "Survival Probability S(t)",
+  risk.table.title = "Number at Risk"
+)
+```
+
+### Median survival and confidence interval
+
+```{r km-median}
+km_tab <- summary(km_overall)$table
+
+data.frame(
+  Quantity = c("Median survival", "95% CI Lower", "95% CI Upper", "RMST"),
+  Value    = c(
+    ifelse(is.na(km_tab["median"]), "Not reached", km_tab["median"]),
+    ifelse(is.na(km_tab["0.95LCL"]), "Not reached", km_tab["0.95LCL"]),
+    ifelse(is.na(km_tab["0.95UCL"]), "Not reached", km_tab["0.95UCL"]),
+    paste(round(km_tab["rmean"], 2), "days")
+  )
+) %>%
+  style_table("Table 1: Overall Median Survival and RMST")
+```
+
+**Q1: What is the median survival time?**
+
+The median survival time is not reached in either group because the overall event
+rate is only 14% — the KM curve never drops below 0.5, so the median is
+mathematically undefined. We report the Restricted Mean Survival Time (RMST)
+instead: the average rat remained tumour-free for **`r round(km_tab["rmean"], 2)` days**
+out of the 104-day study period.
+
+### Survival probabilities at key time points
+
+```{r km-timepoints}
+time_quantiles <- quantile(rats_clean$time, probs = c(0.25, 0.50, 0.75))
+
+km_tp <- summary(km_overall, times = as.numeric(time_quantiles))
+
+data.frame(
+  Percentile   = c("25th", "50th", "75th"),
+  Time_days    = round(time_quantiles, 1),
+  Survival     = round(km_tp$surv,  4),
+  Lower_95CI   = round(km_tp$lower, 4),
+  Upper_95CI   = round(km_tp$upper, 4),
+  N_at_risk    = km_tp$n.risk
+) %>%
+  style_table("Table 2: Survival Probabilities at Percentile Time Points")
+```
+
+**Q2: Survival probabilities at key time points:**
+
+At the 25th percentile of observed time (80.75 days), approximately 97% of
+rats are still tumour-free. At the 50th percentile (98 days), about 91%
+remain tumour-free. By the 75th percentile (104 days), survival probability
+is still above 85%, reflecting the low overall event rate in this study.
+
+### Stratified KM curves by treatment
+
+```{r}
+cat("Levels of treatment:", levels(rats_clean$treatment), "\n")
+cat("Table of treatment:\n")
+print(table(rats_clean$treatment))
+cat("Class:", class(rats_clean$treatment), "\n")
+```
+
+
+```{r km-treatment, fig.height=7}
+# force remove any existing rats object and reload completely fresh
+if (exists("rats")) rm(rats)
+data(rats, package = "survival")
+
+# check what rx actually looks like before recoding
+cat("rx unique values:", unique(rats$rx), "\n")
+cat("rx class:", class(rats$rx), "\n")
+cat("rx table:\n"); print(table(rats$rx))
+
+rats <- rats %>%
+  mutate(
+    litter    = as.factor(litter),
+    event     = as.numeric(status),
+    # use as.numeric() to force proper comparison regardless of storage type
+    treatment = factor(
+      ifelse(as.numeric(rx) == 1, "Treated", "Control"),
+      levels = c("Control", "Treated")
+    ),
+    sex = as.factor(sex)
+  )
+
+# verify the fix worked
+cat("\ntreatment table after recoding:\n")
+print(table(rats$treatment))
+
+rats_clean <- rats %>%
+  select(litter, time, event, treatment, sex) %>%
+  na.omit()
+
+surv_obj <- Surv(time = rats_clean$time, event = rats_clean$event)
+```
+
+### Stratified KM curves by sex
+
+```{r km-sex, fig.height=7}
+km_sex <- survfit(surv_obj ~ sex, data = rats_clean)
+
+ggsurvplot(
+  km_sex,
+  data             = rats_clean,
+  conf.int         = TRUE,
+  risk.table       = TRUE,
+  pval             = TRUE,
+  pval.method      = TRUE,
+  palette          = c("#A23B72", "#3B7080"),
+  legend.labs      = c("Female", "Male"),
+  legend.title     = "Sex",
+  ggtheme          = theme_minimal(),
+  title            = "Kaplan–Meier Curves by Sex",
+  xlab             = "Time (days)",
+  ylab             = "Survival Probability S(t)",
+  risk.table.title = "Number at Risk",
+  tables.theme     = theme_cleantable()
+)
+```
+
+### RMST by group
+
+```{r rmst}
+# check actual row names first
+km_treatment <- survfit(Surv(time, event) ~ treatment, data = rats_clean)
+km_overall   <- survfit(Surv(time, event) ~ 1, data = rats_clean)
+
+rmst_groups <- summary(km_treatment)$table
+cat("Row names in rmst_groups:\n")
+print(rownames(rmst_groups))
+
+# use actual row names dynamically
+ctrl_row <- rownames(rmst_groups)[grep("Control", rownames(rmst_groups))]
+trt_row  <- rownames(rmst_groups)[grep("Treated", rownames(rmst_groups))]
+
+data.frame(
+  Group     = c("Overall", "Control", "Treated"),
+  RMST_days = round(c(
+    summary(km_overall)$table["rmean"],
+    rmst_groups[ctrl_row, "rmean"],
+    rmst_groups[trt_row,  "rmean"]
+  ), 2),
+  SE = round(c(
+    summary(km_overall)$table["se(rmean)"],
+    rmst_groups[ctrl_row, "se(rmean)"],
+    rmst_groups[trt_row,  "se(rmean)"]
+  ), 4)
+) %>%
+  style_table("Table 3: Restricted Mean Survival Time by Group")
+```
+
+**Q3: How does survival differ between groups?**
+
+The KM curves show clear separation between groups. The treated group drops
+faster, particularly after day 75, consistent with the carcinogenic agent
+accelerating tumour onset. The RMST difference is 1.83 days (Control 100.38
+vs Treated 98.55). The sex stratification reveals a more striking separation —
+female rats develop tumours at a far higher rate than males (p < 0.0001),
+with male rats remaining almost entirely tumour-free throughout the study.
+
+---
+
+## Step 2: Nelson–Aalen Estimator
+
+### Cumulative hazard function
+
+```{r na-overall, fig.height=6}
+na_overall <- survfit(surv_obj ~ 1, data = rats_clean,
+                      type = "fleming-harrington")
+
+ggsurvplot(
+  na_overall,
+  data    = rats_clean,
+  fun     = "cumhaz",
+  conf.int = TRUE,
+  palette = "#2E86AB",
+  ggtheme = theme_minimal(),
+  title   = "Nelson–Aalen Cumulative Hazard Estimate",
+  xlab    = "Time (days)",
+  ylab    = "Cumulative Hazard H(t)"
+)
+```
+
+```{r na-by-group, fig.height=6}
+na_rx <- survfit(surv_obj ~ treatment, data = rats_clean,
+                 type = "fleming-harrington")
+
+ggsurvplot(
+  na_rx,
+  data         = rats_clean,
+  fun          = "cumhaz",
+  conf.int     = TRUE,
+  palette      = c("#2E86AB", "#F18F01"),
+  legend.labs  = c("Control", "Treated"),
+  legend.title = "Group",
+  ggtheme      = theme_minimal(),
+  title        = "Cumulative Hazard by Treatment Group",
+  xlab         = "Time (days)",
+  ylab         = "Cumulative Hazard H(t)"
+)
+```
+
+**Q1: Shape of the cumulative hazard:**
+
+The cumulative hazard function H(t) is concave upward — it accelerates over
+time rather than growing linearly. This means the hazard is not constant. The
+curve is flat early in the study and steepens sharply after day 75, indicating
+that tumour risk is concentrated in the later part of the follow-up period.
+
+### Smoothed hazard function
+
+```{r hazard-smooth, fig.height=5}
+na_data <- data.frame(
+  time   = na_overall$time,
+  cumhaz = na_overall$cumhaz
+)
+na_data$delta_H <- c(na_data$cumhaz[1], diff(na_data$cumhaz))
+na_data$delta_t <- c(na_data$time[1],   diff(na_data$time))
+na_data$hazard  <- na_data$delta_H / pmax(na_data$delta_t, 1)
+
+loess_fit            <- loess(hazard ~ time, data = na_data, span = 0.5)
+na_data$smooth_haz   <- pmax(predict(loess_fit), 0)
+
+# Weibull parametric hazard for comparison
+weibull_overall <- flexsurvreg(surv_obj ~ 1, data = rats_clean, dist = "weibull")
+t_seq           <- seq(1, max(rats_clean$time), length.out = 200)
+weibull_h       <- summary(weibull_overall, t = t_seq, type = "hazard")[[1]]
+
+plot(na_data$time, na_data$smooth_haz,
+     type = "l", col = "#2E86AB", lwd = 2,
+     xlab = "Time (days)", ylab = "h(t)",
+     main = "Non-Parametric (Nelson–Aalen) vs Weibull Hazard")
+lines(weibull_h$time, weibull_h$est,
+      col = "#F18F01", lwd = 2, lty = 2)
+legend("topleft",
+       legend = c("Nelson–Aalen (smoothed)", "Weibull (parametric)"),
+       col = c("#2E86AB", "#F18F01"), lwd = 2, lty = c(1, 2), bty = "n")
+grid()
+```
+
+**Q2: Hazard trend and comparison with Weibull:**
+
+The smoothed non-parametric hazard is monotonically increasing — confirming
+the trend implied by the Weibull shape parameter k = 3.667 from Project 1.
+Both estimates agree closely in shape and direction. The Weibull parametric
+hazard aligns well with the Nelson–Aalen smoothed estimate, particularly in
+the acceleration pattern after day 60. This consistency between the
+non-parametric and parametric approaches strongly supports the Weibull model
+as an appropriate distributional assumption for this data.
+
+---
+
+## Step 3: Non-Parametric Hypothesis Testing
+
+### Log-rank test
+
+```{r logrank}
+lr_treatment <- survdiff(surv_obj ~ treatment, data = rats_clean)
+lr_sex       <- survdiff(surv_obj ~ sex,       data = rats_clean)
+
+pval_lr_trt <- 1 - pchisq(lr_treatment$chisq, df = 1)
+pval_lr_sex <- 1 - pchisq(lr_sex$chisq,       df = 1)
+
+data.frame(
+  Comparison  = c("Treatment (Control vs Treated)", "Sex (Female vs Male)"),
+  Chi_squared = round(c(lr_treatment$chisq, lr_sex$chisq), 4),
+  df          = 1,
+  p_value     = round(c(pval_lr_trt, pval_lr_sex), 4),
+  Conclusion  = c(
+    ifelse(pval_lr_trt < 0.05, "Significant difference", "No significant difference"),
+    ifelse(pval_lr_sex < 0.05, "Significant difference", "No significant difference")
+  )
+) %>%
+  style_table("Table 4: Log-Rank Test Results")
+```
+
+### Wilcoxon (Breslow) test
+
+```{r wilcoxon}
+wc_treatment <- survdiff(surv_obj ~ treatment, data = rats_clean, rho = 1)
+wc_sex       <- survdiff(surv_obj ~ sex,       data = rats_clean, rho = 1)
+
+pval_wc_trt <- 1 - pchisq(wc_treatment$chisq, df = 1)
+pval_wc_sex <- 1 - pchisq(wc_sex$chisq,       df = 1)
+
+data.frame(
+  Comparison  = c("Treatment (Control vs Treated)", "Sex (Female vs Male)"),
+  Chi_squared = round(c(wc_treatment$chisq, wc_sex$chisq), 4),
+  df          = 1,
+  p_value     = round(c(pval_wc_trt, pval_wc_sex), 4),
+  Conclusion  = c(
+    ifelse(pval_wc_trt < 0.05, "Significant difference", "No significant difference"),
+    ifelse(pval_wc_sex < 0.05, "Significant difference", "No significant difference")
+  )
+) %>%
+  style_table("Table 5: Wilcoxon (Breslow) Test Results")
+```
+
+### Comparison of tests
+
+```{r test-comparison}
+data.frame(
+  Test         = c("Log-Rank", "Wilcoxon"),
+  Treatment_p  = round(c(pval_lr_trt, pval_wc_trt), 4),
+  Sex_p        = round(c(pval_lr_sex, pval_wc_sex), 4)
+) %>%
+  style_table("Table 6: Log-Rank vs Wilcoxon p-values")
+```
+
+**Q1: Log-rank test result:**
+
+The log-rank test gives p = `r round(pval_lr_trt, 4)` for treatment — there
+is a statistically significant difference in survival between Control and
+Treated groups. For sex, p < 0.0001, an even stronger result.
+
+**Q2: Wilcoxon test and emphasis on early events:**
+
+The Wilcoxon test weights early time points more heavily. For treatment, both
+tests agree (both p < 0.05), though the Wilcoxon p-value is slightly larger.
+This suggests the survival difference between treatment groups is more
+pronounced at later time points — consistent with the KM curves which separate
+mainly after day 75. For sex, both tests strongly agree.
+
+**Q3: Consistency of tests:**
+
+Both tests yield consistent conclusions for both comparisons. Treatment
+differences are significant under both (p < 0.05), and sex differences are
+highly significant under both (p < 0.001). The slightly larger Wilcoxon p-value
+for treatment confirms that the treatment effect is driven by late-occurring
+tumours rather than early events — biologically plausible given the mechanism
+of carcinogenesis.
+
+---
+
+## Step 4: Cox Proportional Hazards Model
+
+### Univariable Cox models
+
+```{r cox-uni-treatment}
+cox_rx  <- coxph(Surv(time, event) ~ treatment, data = rats_clean)
+cox_sex <- coxph(Surv(time, event) ~ sex,       data = rats_clean)
+
+bind_rows(
+  tidy(cox_rx,  exponentiate = TRUE, conf.int = TRUE),
+  tidy(cox_sex, exponentiate = TRUE, conf.int = TRUE)
+) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 7: Univariable Cox Model Results")
+```
+
+**Q1: Univariable hazard ratios:**
+
+For treatment: HR = `r round(exp(coef(cox_rx)), 3)`,
+95% CI [`r round(exp(confint(cox_rx))[1], 3)`,
+`r round(exp(confint(cox_rx))[2], 3)`], p = `r round(summary(cox_rx)$coefficients[,"Pr(>|z|)"], 4)`.
+Treated rats have approximately double the hazard of tumour development
+compared to controls.
+
+For sex: HR = `r round(exp(coef(cox_sex)), 3)`,
+95% CI [`r round(exp(confint(cox_sex))[1], 3)`,
+`r round(exp(confint(cox_sex))[2], 3)`], p < 0.001.
+Male rats have a 95% lower hazard than females — sex is the dominant predictor.
+
+### Multivariable Cox model
+
+```{r cox-multi}
+cox_multi <- coxph(Surv(time, event) ~ treatment + sex, data = rats_clean)
+
+tidy(cox_multi, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 8: Multivariable Cox Model (Treatment + Sex)")
+```
+
+```{r forest-plot, fig.height=4}
+ggforest(cox_multi, data = rats_clean)
+```
+
+**Q2: Multivariable model — adjusted effects:**
+
+After adjusting for sex, the treatment HR increases slightly from 2.042 to
+2.206, and the p-value strengthens from 0.021 to 0.011. This indicates sex
+was acting as a slight confounder — adjusting for it reveals a marginally
+stronger treatment effect. Both treatment and sex remain significant in the
+multivariable model. Male sex is protective (HR = 0.047), remaining the
+strongest predictor in the model.
+
+### Cox model with litter clustering
+
+```{r cox-cluster}
+cox_cluster <- coxph(
+  Surv(time, event) ~ treatment + sex + cluster(litter),
+  data = rats_clean
+)
+
+tidy(cox_cluster, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 9: Cox Model with Litter-Clustered Standard Errors")
+```
+
+### Proportional hazards assumption
+
+```{r ph-test}
+ph_test <- cox.zph(cox_multi)
+
+as.data.frame(ph_test$table) %>%
+  mutate(Variable = rownames(.), across(where(is.numeric), ~round(.x, 4))) %>%
+  select(Variable, everything()) %>%
+  style_table("Table 10: Schoenfeld Residuals Test (PH Assumption)")
+```
+
+```{r schoenfeld-plots, fig.height=5}
+par(mfrow = c(1, 2))
+plot(ph_test, var = 1,
+     main = "Schoenfeld Residuals — Treatment",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#F18F01", lwd = 2)
+abline(h = coef(cox_multi)[1], col = "red", lty = 2, lwd = 2)
+
+plot(ph_test, var = 2,
+     main = "Schoenfeld Residuals — Sex",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#A23B72", lwd = 2)
+abline(h = coef(cox_multi)[2], col = "red", lty = 2, lwd = 2)
+par(mfrow = c(1, 1))
+```
+
+**Q3: Proportional hazards assumption:**
+
+The Schoenfeld test gives p = 0.020 for treatment — the PH assumption is
+violated. The non-flat pattern in the treatment residual plot confirms the
+hazard ratio changes over time. Sex has p = 0.438, so PH holds for sex. The
+global test gives p = 0.046, indicating the overall model also has some
+time-varying behaviour. This violation motivates the use of extended Cox models
+and parametric approaches.
+
+### Influential observations
+
+```{r dfbetas, fig.height=5}
+dfb <- residuals(cox_multi, type = "dfbeta")
+
+par(mfrow = c(1, 2))
+plot(dfb[, 1], ylab = "dfbeta (treatment)",
+     main = "Influence on Treatment Coefficient",
+     pch = 16, cex = 0.6, col = "#2E86AB")
+abline(h = 0, lty = 2, col = "red")
+
+plot(dfb[, 2], ylab = "dfbeta (sex)",
+     main = "Influence on Sex Coefficient",
+     pch = 16, cex = 0.6, col = "#A23B72")
+abline(h = 0, lty = 2, col = "red")
+par(mfrow = c(1, 1))
+```
+
+**Q4: Influential observations:**
+
+The dfbeta plots show all observations clustered near zero with no extreme
+outliers. No single rat is disproportionately influencing either the treatment
+or sex coefficient estimate. The model is stable.
+
+### Martingale and deviance residuals
+
+```{r martingale, fig.height=5}
+mart_null <- residuals(
+  coxph(Surv(time, event) ~ 1, data = rats_clean),
+  type = "martingale"
+)
+
+dev_resid <- residuals(cox_multi, type = "deviance")
+
+par(mfrow = c(1, 2))
+plot(rats_clean$time, mart_null,
+     pch = 16, cex = 0.5, col = "#2E86AB",
+     xlab = "Time (days)", ylab = "Martingale Residual",
+     main = "Martingale Residuals vs Time")
+lines(lowess(rats_clean$time, mart_null), col = "red", lwd = 2)
+abline(h = 0, lty = 2)
+
+plot(dev_resid, pch = 16, cex = 0.5, col = "#43A047",
+     ylab = "Deviance Residual",
+     main = "Deviance Residuals")
+abline(h = c(-2, 0, 2), lty = c(2, 1, 2), col = c("red", "black", "red"))
+par(mfrow = c(1, 1))
+```
+
+**Q5: Linearity and functional form:**
+
+Since both covariates are categorical (treatment and sex), the linearity
+assumption in the log-hazard does not apply in the usual sense. The Martingale
+residual plot shows a roughly flat lowess line around zero, suggesting no
+obvious non-linear time trend beyond what the model already captures. Deviance
+residuals are mostly within ±2, confirming no severe outliers.
+
+---
+
+## Step 5: Model Refinement — Addressing PH Violation
+
+Since the PH assumption is violated for treatment (p = 0.020), we apply two
+remedies: stratification and time-dependent coefficients.
+
+### Strategy 1 — Stratified Cox model
+
+```{r cox-stratified}
+cox_strat <- coxph(
+  Surv(time, event) ~ treatment + strata(sex),
+  data = rats_clean
+)
+
+tidy(cox_strat, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 11: Stratified Cox Model (Stratified by Sex)")
+```
+
+```{r ph-strat}
+ph_strat <- cox.zph(cox_strat)
+
+as.data.frame(ph_strat$table) %>%
+  mutate(Variable = rownames(.), across(where(is.numeric), ~round(.x, 4))) %>%
+  select(Variable, everything()) %>%
+  style_table("Table 12: PH Test on Stratified Model")
+```
+
+### Strategy 2 — Time-dependent coefficient
+
+```{r cox-td}
+# create a numeric version of treatment for tt()
+rats_clean$treatment_num <- as.numeric(rats_clean$treatment == "Treated")
+
+cox_td <- coxph(
+  Surv(time, event) ~ treatment + sex + tt(treatment_num),
+  tt   = function(x, t, ...) x * log(t + 1),
+  data = rats_clean
+)
+
+tidy(cox_td, exponentiate = TRUE, conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  style_table("Table 13: Cox Model with Time-Dependent Treatment Coefficient")
+
+data.frame(
+  Model = c("Original multivariable", "Stratified by sex",
+            "Time-dependent coefficient"),
+  AIC   = round(c(AIC(cox_multi), AIC(cox_strat), AIC(cox_td)), 3),
+  Notes = c("PH violated for treatment",
+            "Allows different baseline per sex",
+            "Allows HR to vary with log(t + 1)")
+) %>%
+  style_table("Table 14: Model Comparison by AIC")
+```
+
+### Model comparison
+
+```{r model-aic}
+data.frame(
+  Model = c("Original multivariable", "Stratified by sex",
+            "Time-dependent coefficient"),
+  AIC   = round(c(AIC(cox_multi), AIC(cox_strat), AIC(cox_td)), 3),
+  Notes = c("PH violated for treatment",
+            "Allows different baseline per sex",
+            "Allows HR to vary with log(time)")
+) %>%
+  style_table("Table 14: Model Comparison by AIC")
+```
+
+**Q1: Strategy for PH violation:**
+
+Two strategies were used. The stratified model allows a different baseline
+hazard for each sex group while still estimating the treatment HR — this
+resolves the PH issue for sex and gives a cleaner treatment estimate.
+The time-dependent coefficient model includes `treatment × log(t)` which
+directly models how the treatment HR changes over time.
+
+**Q2: Final refined model:**
+
+The stratified Cox model is our preferred refined model. It gives a clean
+treatment HR that is now free from the sex-related PH issue. The treatment
+effect remains significant after stratification, confirming robustness.
+Compared to the original model, AIC is lower for the stratified version,
+indicating improved model fit.
+
+**Q3: Comparison with initial model:**
+
+The treatment HR from the stratified model is consistent with the original
+multivariable estimate (~2.2), confirming that the PH violation does not
+fundamentally change the direction or magnitude of the treatment effect —
+it only affects the precision of inference over time.
+
+---
+
+## Step 6: Comprehensive Interpretation and Synthesis
+
+### KM vs best parametric model overlay
+
+```{r km-vs-weibull, fig.height=6}
+weibull_fit <- flexsurvreg(surv_obj ~ 1, data = rats_clean, dist = "weibull")
+t_plot      <- seq(0.1, max(rats_clean$time), length.out = 300)
+wb_surv     <- summary(weibull_fit, t = t_plot, type = "survival")[[1]]
+
+plot(km_overall, col = "black", lwd = 2.5, conf.int = FALSE,
+     xlab = "Time (days)", ylab = "S(t)",
+     main = "KM Curve vs Best Parametric Model (Weibull)",
+     ylim = c(0, 1))
+lines(wb_surv$time, wb_surv$est, col = "#F18F01", lwd = 2, lty = 2)
+legend("bottomleft",
+       legend = c("Kaplan–Meier", "Weibull (parametric)"),
+       col    = c("black", "#F18F01"),
+       lwd    = 2, lty = c(1, 2), bty = "n")
+grid()
+```
+
+**Q1: KM vs Weibull:**
+
+The Weibull survival curve closely tracks the KM estimate throughout the
+follow-up period. Both curves remain above 0.75 throughout the study,
+consistent with the low 14% event rate. The close alignment validates the
+Weibull as an appropriate parametric model — it captures the empirical
+survival pattern without overfitting. The PP-plot from Project 1 further
+confirmed this good agreement.
+
+### Nelson–Aalen hazard vs Weibull hazard
+
+The overlay plot in Step 2 shows that the smoothed Nelson–Aalen hazard and
+the Weibull parametric hazard follow the same increasing pattern and
+accelerate at a similar rate after day 75.
+
+**Q2: Alignment of hazard estimates:**
+
+The non-parametric hazard trend aligns closely with the Weibull hazard,
+with both showing a monotonically increasing pattern consistent with
+k = 3.667 > 1. This alignment strongly supports the Weibull distributional
+assumption — if the parametric model were misspecified, we would expect
+clear divergence between the two hazard estimates.
+
+### Connecting hypothesis tests to Cox model
+
+```{r test-cox-comparison}
+data.frame(
+  Method       = c("Log-Rank test", "Wilcoxon test",
+                   "Univariable Cox", "Multivariable Cox"),
+  Treatment_p  = round(c(pval_lr_trt, pval_wc_trt,
+                          summary(cox_rx)$coefficients[, "Pr(>|z|)"],
+                          summary(cox_multi)$coefficients["treatmentTreated",
+                                                          "Pr(>|z|)"]), 4),
+  Sex_p        = c(round(pval_lr_sex, 4), round(pval_wc_sex, 4),
+                   round(summary(cox_sex)$coefficients[, "Pr(>|z|)"], 4),
+                   round(summary(cox_multi)$coefficients["sexm",
+                                                         "Pr(>|z|)"], 4))
+) %>%
+  style_table("Table 15: Consistency of p-values Across Methods")
+```
+
+**Q3: Relationship between tests and Cox model:**
+
+All methods give consistent conclusions. The log-rank p-value for treatment
+(0.018) closely matches the univariable Cox p-value (0.021) — this is
+expected because the log-rank test is equivalent to the score test in a
+Cox model with a single binary covariate. The Wilcoxon p-value is slightly
+larger for treatment (0.023), reflecting its down-weighting of late events
+where the treatment effect is concentrated. For sex, all four methods give
+p < 0.001, confirming this is the most robust finding in the analysis.
+
+### Overall survival summary
+
+```{r survival-summary}
+data.frame(
+  Quantity = c(
+    "Total rats", "Events (tumours)", "Censored", "Event rate",
+    "RMST — Overall", "RMST — Control", "RMST — Treated",
+    "RMST difference",
+    "Log-rank p (treatment)", "Log-rank p (sex)",
+    "Cox HR — Treated vs Control (adjusted)",
+    "Cox HR — Male vs Female (adjusted)",
+    "Weibull shape k", "Weibull scale λ",
+    "Mean tumour-free survival (overall)",
+    "Mean tumour-free survival (Control)",
+    "Mean tumour-free survival (Treated)",
+    "Frailty variance θ"
+  ),
+  Value = c(
+    300, 42, 258, "14%",
+    paste(round(summary(km_overall)$table["rmean"], 2), "days"),
+    paste(round(rmst_groups["treatment=Control", "rmean"], 2), "days"),
+    paste(round(rmst_groups["treatment=Treated", "rmean"], 2), "days"),
+    paste(round(rmst_groups["treatment=Control", "rmean"] -
+                  rmst_groups["treatment=Treated", "rmean"], 2), "days"),
+    round(pval_lr_trt, 4),
+    round(pval_lr_sex, 4),
+    paste(round(exp(coef(cox_multi)["treatmentTreated"]), 3),
+          "[1.203, 4.044]"),
+    paste(round(exp(coef(cox_multi)["sexm"]), 3), "[0.011, 0.193]"),
+    "3.667", "160.6",
+    "~150.6 days",
+    "~173.2 days",
+    "~124.8 days",
+    "2.02"
+  )
+) %>%
+  style_table("Table 16: Comprehensive Results Summary")
+```
+
+**Q4: Overall survival experience:**
+
+The median survival was not reached in either group due to the low event
+rate (14%). On average, rats remained tumour-free for approximately 99.8 days
+out of the 104-day study period (RMST). Control rats lasted 1.83 days longer
+on average than treated rats — a small absolute difference that becomes more
+meaningful in context of the doubling of hazard seen in the Cox models.
+
+**Q5: Nature of the hazard:**
+
+The hazard is monotonically increasing over time, confirmed by both the
+non-parametric Nelson–Aalen estimate and the Weibull shape parameter k = 3.667.
+This means tumour risk accelerates as rats age through the study period —
+a rat that has survived 90 days faces substantially higher risk than one that
+just entered the study. The increasing hazard also explains why the Exponential
+model (which assumes constant hazard) was decisively rejected with ΔAIC = 51.3
+in Project 1.
+
+**Q6: Key predictors from the final Cox model:**
+
+Two variables are strong independent predictors:
+
+- **Treatment (HR = 2.21, 95% CI [1.20, 4.04], p = 0.011):** Treated rats
+  have more than double the instantaneous hazard of tumour development
+  compared to controls at any given time, after adjusting for sex. This
+  directly reflects the effect of the carcinogenic agent.
+
+- **Sex (HR = 0.047, 95% CI [0.011, 0.193], p < 0.001):** Male rats have
+  a 95.3% lower hazard than female rats. This is the largest effect in the
+  analysis and is biologically important — female rats in this study are
+  overwhelmingly driving the tumour events (40 out of 42).
+
+**Q7: Clinical and practical implications:**
+
+The carcinogenic drug significantly accelerates tumour onset. The frailty
+variance θ = 2.02 confirms that litter identity is a strong determinant of
+tumour risk beyond the observed covariates — rats within the same litter share
+unobserved genetic susceptibility. Any future study using this carcinogen
+should account for litter clustering in its analysis and design. The sex
+effect is dramatic enough to suggest that studies of this carcinogen should
+either be sex-stratified or restrict to one sex to reduce unexplained
+variability. The PH violation for treatment suggests the carcinogen's effect
+may wane or strengthen over time — a time-varying effect that future
+longitudinal studies should monitor explicitly.
+
+---
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+```{r}
+# create output folders
+if (!dir.exists("outputs"))        dir.create("outputs")
+if (!dir.exists("outputs/plots"))  dir.create("outputs/plots")
+if (!dir.exists("outputs/tables")) dir.create("outputs/tables")
+
+# ── PLOTS ──────────────────────────────────────────────────────────────────
+
+# KM overall
+png("outputs/plots/km_overall.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(
+  km_overall, data = rats_clean, conf.int = TRUE, risk.table = TRUE,
+  palette = "#2E86AB", ggtheme = theme_minimal(),
+  title = "Overall Kaplan–Meier Survival Curve",
+  xlab = "Time (days)", ylab = "S(t)",
+  risk.table.title = "Number at Risk"
+))
+dev.off()
+
+# KM by treatment
+png("outputs/plots/km_by_treatment.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(
+  km_treatment, data = rats_clean, conf.int = TRUE, risk.table = TRUE,
+  pval = TRUE, palette = c("#2E86AB", "#F18F01"),
+  legend.labs = c("Control", "Treated"), legend.title = "Group",
+  ggtheme = theme_minimal(),
+  title = "Kaplan–Meier Curves by Treatment Group",
+  xlab = "Time (days)", ylab = "S(t)", surv.median.line = "none",
+  tables.theme = theme_cleantable()
+))
+dev.off()
+
+# KM by sex
+png("outputs/plots/km_by_sex.png", width = 900, height = 700, res = 120)
+print(ggsurvplot(
+  km_sex, data = rats_clean, conf.int = TRUE, risk.table = TRUE,
+  pval = TRUE, palette = c("#A23B72", "#3B7080"),
+  legend.labs = c("Female", "Male"), legend.title = "Sex",
+  ggtheme = theme_minimal(),
+  title = "Kaplan–Meier Curves by Sex",
+  xlab = "Time (days)", ylab = "S(t)",
+  tables.theme = theme_cleantable()
+))
+dev.off()
+
+# Nelson-Aalen cumulative hazard overall
+png("outputs/plots/nelson_aalen_overall.png", width = 900, height = 600, res = 120)
+print(ggsurvplot(
+  na_overall, data = rats_clean, fun = "cumhaz", conf.int = TRUE,
+  palette = "#2E86AB", ggtheme = theme_minimal(),
+  title = "Nelson–Aalen Cumulative Hazard",
+  xlab = "Time (days)", ylab = "H(t)"
+))
+dev.off()
+
+# Nelson-Aalen by treatment
+png("outputs/plots/nelson_aalen_by_treatment.png", width = 900, height = 600, res = 120)
+print(ggsurvplot(
+  na_rx, data = rats_clean, fun = "cumhaz", conf.int = TRUE,
+  palette = c("#2E86AB", "#F18F01"),
+  legend.labs = c("Control", "Treated"), legend.title = "Group",
+  ggtheme = theme_minimal(),
+  title = "Cumulative Hazard by Treatment Group",
+  xlab = "Time (days)", ylab = "H(t)"
+))
+dev.off()
+
+# Smoothed hazard vs Weibull
+png("outputs/plots/hazard_na_vs_weibull.png", width = 900, height = 600, res = 120)
+plot(na_data$time, na_data$smooth_haz,
+     type = "l", col = "#2E86AB", lwd = 2,
+     xlab = "Time (days)", ylab = "h(t)",
+     main = "Nelson–Aalen vs Weibull Hazard")
+lines(weibull_h$time, weibull_h$est,
+      col = "#F18F01", lwd = 2, lty = 2)
+legend("topleft",
+       legend = c("Nelson–Aalen (smoothed)", "Weibull (parametric)"),
+       col = c("#2E86AB", "#F18F01"), lwd = 2, lty = c(1, 2), bty = "n")
+grid()
+dev.off()
+
+# Forest plot
+png("outputs/plots/forest_plot.png", width = 900, height = 500, res = 120)
+print(ggforest(cox_multi, data = rats_clean))
+dev.off()
+
+# Schoenfeld residuals
+png("outputs/plots/schoenfeld_residuals.png", width = 900, height = 500, res = 120)
+par(mfrow = c(1, 2))
+plot(ph_test, var = 1, main = "Schoenfeld — Treatment",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#F18F01", lwd = 2)
+abline(h = coef(cox_multi)[1], col = "red", lty = 2, lwd = 2)
+plot(ph_test, var = 2, main = "Schoenfeld — Sex",
+     ylab = "Beta(t)", xlab = "Time (days)", col = "#A23B72", lwd = 2)
+abline(h = coef(cox_multi)[2], col = "red", lty = 2, lwd = 2)
+par(mfrow = c(1, 1))
+dev.off()
+
+# dfbeta influential observations
+png("outputs/plots/dfbeta_residuals.png", width = 900, height = 500, res = 120)
+par(mfrow = c(1, 2))
+plot(dfb[, 1], ylab = "dfbeta (treatment)",
+     main = "Influence on Treatment Coefficient",
+     pch = 16, cex = 0.6, col = "#2E86AB")
+abline(h = 0, lty = 2, col = "red")
+plot(dfb[, 2], ylab = "dfbeta (sex)",
+     main = "Influence on Sex Coefficient",
+     pch = 16, cex = 0.6, col = "#A23B72")
+abline(h = 0, lty = 2, col = "red")
+par(mfrow = c(1, 1))
+dev.off()
+
+# Martingale and deviance residuals
+png("outputs/plots/martingale_deviance.png", width = 900, height = 500, res = 120)
+par(mfrow = c(1, 2))
+plot(rats_clean$time, mart_null,
+     pch = 16, cex = 0.5, col = "#2E86AB",
+     xlab = "Time (days)", ylab = "Martingale Residual",
+     main = "Martingale Residuals vs Time")
+lines(lowess(rats_clean$time, mart_null), col = "red", lwd = 2)
+abline(h = 0, lty = 2)
+plot(dev_resid, pch = 16, cex = 0.5, col = "#43A047",
+     ylab = "Deviance Residual", main = "Deviance Residuals")
+abline(h = c(-2, 0, 2), lty = c(2, 1, 2), col = c("red", "black", "red"))
+par(mfrow = c(1, 1))
+dev.off()
+
+# KM vs Weibull overlay
+png("outputs/plots/km_vs_weibull.png", width = 900, height = 600, res = 120)
+plot(km_overall, col = "black", lwd = 2.5, conf.int = FALSE,
+     xlab = "Time (days)", ylab = "S(t)",
+     main = "KM Curve vs Best Parametric Model (Weibull)", ylim = c(0, 1))
+lines(wb_surv$time, wb_surv$est, col = "#F18F01", lwd = 2, lty = 2)
+legend("bottomleft",
+       legend = c("Kaplan–Meier", "Weibull (parametric)"),
+       col = c("black", "#F18F01"), lwd = 2, lty = c(1, 2), bty = "n")
+grid()
+dev.off()
+
+# ── TABLES ─────────────────────────────────────────────────────────────────
+
+write.csv(data.frame(
+  Percentile = c("25th", "50th", "75th"),
+  Time_days  = round(time_quantiles, 1),
+  Survival   = round(km_tp$surv,  4),
+  Lower_95CI = round(km_tp$lower, 4),
+  Upper_95CI = round(km_tp$upper, 4),
+  N_at_risk  = km_tp$n.risk
+), "outputs/tables/survival_at_timepoints.csv", row.names = FALSE)
+
+write.csv(data.frame(
+  Method      = c("Log-Rank", "Wilcoxon"),
+  Treatment_p = round(c(pval_lr_trt, pval_wc_trt), 4),
+  Sex_p       = round(c(pval_lr_sex, pval_wc_sex), 4)
+), "outputs/tables/hypothesis_tests.csv", row.names = FALSE)
+
+write.csv(
+  tidy(cox_multi, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(across(where(is.numeric), ~round(.x, 3))),
+  "outputs/tables/cox_multivariable.csv", row.names = FALSE
+)
+
+write.csv(
+  tidy(cox_strat, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(across(where(is.numeric), ~round(.x, 3))),
+  "outputs/tables/cox_stratified.csv", row.names = FALSE
+)
+
+write.csv(
+  tidy(cox_td, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(across(where(is.numeric), ~round(.x, 3))),
+  "outputs/tables/cox_time_dependent.csv", row.names = FALSE
+)
+
+write.csv(
+  as.data.frame(ph_test$table) %>%
+    mutate(Variable = rownames(.), across(where(is.numeric), ~round(.x, 4))),
+  "outputs/tables/ph_schoenfeld_test.csv", row.names = FALSE
+)
+
+cat("All plots saved to outputs/plots/\n")
+cat("All tables saved to outputs/tables/\n")
+cat("\nPlots saved:\n")
+cat(paste(" -", list.files("outputs/plots")), sep = "\n")
+cat("\nTables saved:\n")
+cat(paste(" -", list.files("outputs/tables")), sep = "\n")
+```
+
